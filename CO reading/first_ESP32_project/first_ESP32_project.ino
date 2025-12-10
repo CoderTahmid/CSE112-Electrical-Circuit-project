@@ -1,159 +1,196 @@
+// MQ-7 ESP32 — fixed timing + clearer logs
+#define HEATER_PIN 25 // MOSFET gate (GPIO 25)
+#define SENSOR_PIN 34 // AO (GPIO 34, ADC1_CH6)
 
+#include <math.h>
 
-// #include <Arduino.h>
-// #include <Preferences.h>
-// #include <math.h>
+float RL = 10000.0; // Load resistor on your MQ-7 board (10k typical)
+float R0 = 10000.0; // Calibrate in clean air and update
 
-// Preferences prefs;
+const float slope_m = -0.77;
+const float constant_b = 1.7;
 
-// #define SENSOR_PIN        4        // analog pin (GPIO4)
-// #define RL_VALUE          10000.0  // load resistor in ohms (change if different)
-// #define SENSOR_VCC        3.3      // sensor supply used by voltage divider (V)
-// #define ADC_MAX           4095.0   // 12-bit ADC
-// #define SAMPLES           10       // analog samples to average
-// #define CALIB_SAMPLES     60       // samples to average for initial calibration
-// #define CALIB_DELAY_MS    500      // delay between calibration samples in ms
-// #define PRINT_INTERVAL    1000     // main loop print interval in ms
+// Timing constants (exact cycle you requested)
+const unsigned long FULL_MS = 60000UL; // 60 seconds full heat
+const unsigned long LOW_MS = 90000UL;  // 90 seconds low-power
+const unsigned long QUICK_MS = 50UL;   // 50 ms quick full-power read
 
-// float R0 = -1.0;
-// unsigned long lastPrint = 0;
+// Sampling inside phases
+const unsigned long SAMPLE_INTERVAL_MS = 10000UL; // sample every 10 seconds
+const int ADC_SAMPLES = 8;                        // average N samples
 
-// void setup() {
-//   Serial.begin(115200);
-//   while (!Serial && millis() < 2000) delay(10);
-//   Serial.println();
-//   Serial.println("MQ-7 approximate ppm reader (3V, approximate).");
+// PWM settings
+const int pwmChannel = 0;
+const int pwmFreq = 1000;
+const int pwmRes = 8; // 0..255
+const int dutyFull = 255;
+const int dutyLow = 72; // ~28% -> ~1.4V avg (1.4/5 ≈ 0.28)
 
-//   // Set ADC attenuation so ADC covers to ~3.3V (use ADC_11db)
-//   // On many cores the function is analogSetPinAttenuation(pin, attenuation)
-//   // If not available on your core comment the next line.
-//   #if defined(analogSetPinAttenuation)
-//     analogSetPinAttenuation(SENSOR_PIN, ADC_11db); // allow reading up to ~3.3V
-//   #endif
+void setup()
+{
+  Serial.begin(115200);
+  delay(100);
 
-//   // Load saved R0 if exists
-//   prefs.begin("mq7", false);
-//   if (prefs.isKey("R0")) {
-//     R0 = prefs.getFloat("R0", -1.0);
-//     if (R0 > 0) {
-//       Serial.print("Loaded saved R0 = ");
-//       Serial.print(R0, 2);
-//       Serial.println(" ohm (approx)");
-//     } else {
-//       R0 = -1;
-//     }
-//   }
+  // ADC attenuation for near 3.3V range (use ADC_11db for max range)
+  analogSetPinAttenuation(SENSOR_PIN, ADC_11db);
 
-//   // If R0 not saved, calibrate now (automatic)
-//   if (R0 <= 0) {
-//     Serial.println("No saved calibration (R0). Starting auto-calibration.");
-//     Serial.println(">>> Keep sensor in CLEAN, fresh air during calibration.");
-//     Serial.println("Auto-calibration will take roughly (CALIB_SAMPLES * CALIB_DELAY_MS) ms.");
-//     calibrateR0(CALIB_SAMPLES);
-//   }
-// }
+  ledcSetup(pwmChannel, pwmFreq, pwmRes);
+  ledcAttachPin(HEATER_PIN, pwmChannel);
 
-// float readSensorVoltage() {
-//   long total = 0;
-//   for (int i = 0; i < SAMPLES; ++i) {
-//     total += analogRead(SENSOR_PIN);
-//     delay(10);
-//   }
-//   float raw = (float)total / SAMPLES;
-//   // convert ADC count -> voltage using ADC range. We used 11db attenuation so Vref ~3.3V
-//   float voltage = raw / ADC_MAX * 3.3;
-//   return voltage;
-// }
-
-// float calcRs(float vSensor) {
-//   // Divider: Vout = Vc * RL/(Rs + RL) => Rs = RL*(Vc/Vout - 1)
-//   if (vSensor <= 0.0001) return 1e9;
-//   float Rs = RL_VALUE * (SENSOR_VCC / vSensor - 1.0);
-//   return Rs;
-// }
-
-// float rsro_to_ppm(float rs, float r0) {
-//   // Approximation from many hobby sources for MQ-7:
-//   // Rs/R0 = 22.07 * (ppm)^-0.667  => ppm = (22.07/(Rs/R0))^(1/0.667)
-//   if (r0 <= 0) return -1;
-//   float ratio = rs / r0;
-//   if (ratio <= 0) return -1;
-//   float ppm = pow(22.07f / ratio, 1.0f / 0.667f);
-//   return ppm;
-// }
-
-// void calibrateR0(int samples_for_cal) {
-//   double sumRs = 0.0;
-//   for (int i = 0; i < samples_for_cal; ++i) {
-//     float v = readSensorVoltage();
-//     float rs = calcRs(v);
-//     sumRs += rs;
-//     Serial.print(".");
-//     delay(CALIB_DELAY_MS);
-//   }
-//   Serial.println();
-//   R0 = (float)(sumRs / samples_for_cal);
-//   Serial.print("Calibration done. R0 = ");
-//   Serial.print(R0, 2);
-//   Serial.println(" ohm (approx). Saving to flash.");
-//   prefs.putFloat("R0", R0);
-// }
-
-// void loop() {
-//   unsigned long now = millis();
-//   if (now - lastPrint >= PRINT_INTERVAL) {
-//     lastPrint = now;
-//     float v = readSensorVoltage();
-//     float rs = calcRs(v);
-
-//     Serial.print("V_sensor: ");
-//     Serial.print(v, 3);
-//     Serial.print(" V, Rs: ");
-//     Serial.print(rs, 1);
-//     Serial.print(" ohm, ");
-
-//     if (R0 <= 0) {
-//       Serial.println("R0 not set. No ppm available.");
-//     } else {
-//       float ppm = rsro_to_ppm(rs, R0);
-//       if (ppm < 0 || isnan(ppm) || isinf(ppm)) {
-//         Serial.println("ppm: ERR");
-//       } else {
-//         Serial.print("CO (approx ppm): ");
-//         Serial.println(ppm, 2);
-//       }
-//     }
-//   }
-
-//   // allow Serial input commands:
-//   // type 'c' in Serial Monitor then Enter to re-run calibration manually
-//   if (Serial.available()) {
-//     String s = Serial.readStringUntil('\n');
-//     s.trim();
-//     if (s.equalsIgnoreCase("c")) {
-//       Serial.println("Manual recalibration requested. Keep sensor in clean air.");
-//       calibrateR0(CALIB_SAMPLES);
-//     } else if (s.equalsIgnoreCase("d")) {
-//       // delete saved R0
-//       prefs.remove("R0");
-//       R0 = -1;
-//       Serial.println("Deleted saved R0. It will auto-calibrate on next boot or run 'c'.");
-//     } else {
-//       Serial.println("Commands: 'c' = calibrate (in clean air), 'd' = delete saved R0.");
-//     }
-//   }
-// }
-
-
-#include <Arduino.h>
-
-#define HEATER_PIN 25     // Gate control pin
-
-void setup() {
-  pinMode(HEATER_PIN, OUTPUT);
-  digitalWrite(HEATER_PIN, HIGH);  // Turn MOSFET ON -> sensor heater ON
+  Serial.println();
+  Serial.println("=== MQ-7 ESP32: Corrected timing cycle ===");
+  Serial.println("Cycle: 60s @5V -> 90s @1.4V -> 50ms quick read");
+  Serial.println();
 }
 
-void loop() {
-  // do nothing, just keep heater ON
+void loop()
+{
+  unsigned long phaseStart;
+
+  // --- FULL POWER PHASE (5V) ---
+  ledcWrite(pwmChannel, dutyFull);
+  Serial.println(">>> PHASE START: FULL POWER (5V) — 60s");
+  phaseStart = millis();
+  while (millis() - phaseStart < FULL_MS)
+  {
+    doPhaseSample("5V", dutyFull);
+    waitMsOrUntil(SAMPLE_INTERVAL_MS, phaseStart + FULL_MS);
+  }
+  Serial.println("<<< PHASE END: FULL POWER (5V)");
+  Serial.println();
+
+  // --- LOW POWER PHASE (~1.4V avg) ---
+  ledcWrite(pwmChannel, dutyLow);
+  Serial.println(">>> PHASE START: LOW POWER (~1.4V) — 90s");
+  phaseStart = millis();
+  while (millis() - phaseStart < LOW_MS)
+  {
+    doPhaseSample("1.4V", dutyLow);
+    waitMsOrUntil(SAMPLE_INTERVAL_MS, phaseStart + LOW_MS);
+  }
+  Serial.println("<<< PHASE END: LOW POWER (~1.4V)");
+  Serial.println();
+
+  // --- QUICK FULL POWER READ ---
+  ledcWrite(pwmChannel, dutyFull);
+  delay(QUICK_MS); // 50 ms as required
+  Serial.println(">>> QUICK FULL POWER READ");
+  printSingleReading("quick-read");
+  Serial.println("<<< CYCLE COMPLETE");
+  Serial.println();
+}
+
+// Wait up to 'ms' but stop earlier if untilTimeMillis reached
+void waitMsOrUntil(unsigned long ms, unsigned long untilTimeMillis)
+{
+  unsigned long end = millis() + ms;
+  if (end > untilTimeMillis)
+    end = untilTimeMillis;
+  while (millis() < end)
+  {
+    delay(10);
+  }
+}
+
+// Single sampling routine for a phase (averages ADC_SAMPLES)
+void doPhaseSample(const char *tag, int duty)
+{
+  int raw = readAverageADC(SENSOR_PIN, ADC_SAMPLES);
+  float vout = rawToVoltage(raw);
+  float rs = calcRs(vout);
+  float ppm = calcPpm(rs);
+
+  Serial.print("[");
+  Serial.print(tag);
+  Serial.print("] duty=");
+  Serial.print(duty);
+  Serial.print(" (est Vheater avg=");
+  Serial.print((duty / 255.0f) * 5.0f, 2);
+  Serial.print("V) ");
+  printReading(raw, vout, rs, ppm);
+}
+
+void printSingleReading(const char *tag)
+{
+  int raw = readAverageADC(SENSOR_PIN, ADC_SAMPLES);
+  float vout = rawToVoltage(raw);
+  float rs = calcRs(vout);
+  float ppm = calcPpm(rs);
+
+  Serial.print("[");
+  Serial.print(tag);
+  Serial.print("] ");
+  printReading(raw, vout, rs, ppm);
+}
+
+void printReading(int raw, float vout, float rs, float ppm)
+{
+  if (raw == 0)
+  {
+    Serial.println("Raw=0 | Vout=0.000V | Rs=inf | PPM=N/A  <-- ADC=0 (AO disconnected or sensor unpowered)");
+    return;
+  }
+  if (raw >= 4095)
+  {
+    Serial.println("Raw=4095 | Vout~3.300V | Rs~0 | PPM=ovf  <-- ADC saturation (AO > ADC range)");
+    return;
+  }
+
+  Serial.print("Raw=");
+  Serial.print(raw);
+  Serial.print(" | Vout=");
+  Serial.print(vout, 3);
+  Serial.print(" V | Rs=");
+  Serial.print(rs, 1);
+  Serial.print(" ohm | PPM=");
+  if (!isfinite(ppm) || ppm <= 0.0)
+    Serial.println("N/A");
+  else
+    Serial.println(ppm, 2);
+}
+
+// --- ADC helpers ---
+int readAverageADC(int pin, int samples)
+{
+  long sum = 0;
+  for (int i = 0; i < samples; ++i)
+  {
+    sum += analogRead(pin);
+    delay(5);
+  }
+  return (int)(sum / samples);
+}
+
+float rawToVoltage(int raw)
+{
+  return (3.3f * raw) / 4095.0f;
+}
+
+float calcRs(float vout)
+{
+  if (vout <= 0.0001f)
+    return INFINITY;
+  // If your board scales AO down (divider), you must reverse-scale here before using 5.0:
+  // e.g. float sensorVout = vout * (5.0f / 3.3f); // uncomment if AO was divided
+  float sensorVout = vout;
+  if (sensorVout <= 0.0001f)
+    return INFINITY;
+  float rs = (5.0f - sensorVout) * RL / sensorVout;
+  return rs;
+}
+
+float calcPpm(float rs)
+{
+  if (!isfinite(rs) || rs <= 0.0f)
+    return NAN;
+  float ratio = rs / R0;
+  if (ratio <= 0.0f)
+    return NAN;
+  float val = (log10(ratio) - constant_b) / slope_m;
+  if (val > 50.0f)
+    return INFINITY;
+  if (val < -50.0f)
+    return 0.0f;
+  float ppm = pow(10.0f, val);
+  return ppm;
 }
