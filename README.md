@@ -64,7 +64,7 @@ This approach allows precise control of heater behavior while maintaining circui
 ---
 
 ## 🛠️ Hardware Implementation (Breadboard Setup)
-![Breadboard Implementation of the CO Monitoring System](PracticalCircuit1.jpg)[](PracticalCircuit2.jpg)
+![Breadboard Implementation of the CO Monitoring System](PracticalCircuit2.jpg)
 
 ---
 
